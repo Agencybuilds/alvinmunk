@@ -6,6 +6,7 @@ extern crate std;
 use super::*;
 use alvinmunk_reputation::{ReputationContract, ReputationContractClient};
 use ed25519_dalek::{Signer, SigningKey};
+use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     BytesN, Env,
@@ -165,4 +166,54 @@ fn same_week_completions_do_not_double_count_streak() {
     award(&f, &f.attester_sk, 1, &user);
     award(&f, &f.attester_sk, 2, &user); // same week
     assert_eq!(f.quest.get_streak(&user).weeks, 1);
+}
+proptest! {
+    #[test]
+    fn proptest_weekly_streak_invariants(mut weeks in prop::collection::vec(0u64..1000, 1..50)) {
+        let f = setup();
+        let user = Address::generate(&f.env);
+
+        weeks.sort_unstable();
+        // We keep duplicates to test same-week completions too
+
+        let mut current_best = 0;
+        let mut previous_week: Option<u64> = None;
+        let mut expected_consecutive_run = 0;
+
+        for (i, &w) in weeks.iter().enumerate() {
+            let quest_id = (i as u32) + 1;
+            f.quest.create_quest(&quest_id, &2u32, &10u64);
+            f.env.ledger().with_mut(|l| l.timestamp = w * super::WEEK_SECS);
+            award(&f, &f.attester_sk, quest_id, &user);
+
+            let s = f.quest.get_streak(&user);
+
+            // best is monotonic
+            prop_assert!(s.best >= current_best);
+            current_best = s.best;
+
+            // a gap resets to 1
+            if let Some(prev) = previous_week {
+                if w > prev + 1 {
+                    prop_assert_eq!(s.weeks, 1);
+                }
+            }
+
+            // weeks never exceeds consecutive run
+            if let Some(prev) = previous_week {
+                if w == prev {
+                    // same week, consecutive run doesn't increase
+                } else if w == prev + 1 {
+                    expected_consecutive_run += 1;
+                } else {
+                    expected_consecutive_run = 1;
+                }
+            } else {
+                expected_consecutive_run = 1;
+            }
+            prop_assert!(s.weeks <= expected_consecutive_run);
+
+            previous_week = Some(w);
+        }
+    }
 }
