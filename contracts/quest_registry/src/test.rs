@@ -168,52 +168,41 @@ fn same_week_completions_do_not_double_count_streak() {
     assert_eq!(f.quest.get_streak(&user).weeks, 1);
 }
 proptest! {
+    // Each case runs up to 50 signed awards in a fresh env, so keep the case count modest.
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Invariant: for any sorted sequence of completion weeks (duplicates allowed), the
+    /// on-chain streak matches a reference model exactly — same week = no change, the
+    /// next week = +1, any gap = reset to 1 — and `best` is the running maximum.
     #[test]
-    fn proptest_weekly_streak_invariants(mut weeks in prop::collection::vec(0u64..1000, 1..50)) {
+    fn weekly_streak_matches_reference_model(mut weeks in prop::collection::vec(0u64..1000, 1..50)) {
         let f = setup();
         let user = Address::generate(&f.env);
-
         weeks.sort_unstable();
-        // We keep duplicates to test same-week completions too
 
-        let mut current_best = 0;
-        let mut previous_week: Option<u64> = None;
-        let mut expected_consecutive_run = 0;
+        let mut run = 0u32;
+        let mut best = 0u32;
+        let mut prev: Option<u64> = None;
 
         for (i, &w) in weeks.iter().enumerate() {
+            // A fresh quest per completion: the replay guard is keyed per (quest, recipient).
             let quest_id = (i as u32) + 1;
             f.quest.create_quest(&quest_id, &2u32, &10u64);
             f.env.ledger().with_mut(|l| l.timestamp = w * super::WEEK_SECS);
             award(&f, &f.attester_sk, quest_id, &user);
 
+            run = match prev {
+                Some(p) if p == w => run,
+                Some(p) if p + 1 == w => run + 1,
+                _ => 1,
+            };
+            best = best.max(run);
+            prev = Some(w);
+
             let s = f.quest.get_streak(&user);
-
-            // best is monotonic
-            prop_assert!(s.best >= current_best);
-            current_best = s.best;
-
-            // a gap resets to 1
-            if let Some(prev) = previous_week {
-                if w > prev + 1 {
-                    prop_assert_eq!(s.weeks, 1);
-                }
-            }
-
-            // weeks never exceeds consecutive run
-            if let Some(prev) = previous_week {
-                if w == prev {
-                    // same week, consecutive run doesn't increase
-                } else if w == prev + 1 {
-                    expected_consecutive_run += 1;
-                } else {
-                    expected_consecutive_run = 1;
-                }
-            } else {
-                expected_consecutive_run = 1;
-            }
-            prop_assert!(s.weeks <= expected_consecutive_run);
-
-            previous_week = Some(w);
+            prop_assert_eq!(s.weeks, run);
+            prop_assert_eq!(s.best, best);
+            prop_assert!(s.best >= s.weeks);
         }
     }
 }
